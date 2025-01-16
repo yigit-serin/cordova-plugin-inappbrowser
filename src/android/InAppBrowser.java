@@ -24,17 +24,19 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
-import android.os.Parcelable;
-import android.provider.Browser;
 import android.content.res.Resources;
 import android.graphics.Bitmap;
-import android.graphics.drawable.Drawable;
 import android.graphics.Color;
+import android.graphics.drawable.Drawable;
 import android.net.http.SslError;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
+import android.os.Parcelable;
+import android.provider.Browser;
 import android.text.InputType;
+import android.util.Base64;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -54,14 +56,16 @@ import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
-import android.webkit.DownloadListener;
 import android.webkit.WebViewClient;
+import android.webkit.DownloadListener;
 import android.widget.EditText;
 import android.widget.ImageButton;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.RelativeLayout;
 import android.widget.TextView;
+
+import androidx.core.content.FileProvider;
 
 import org.apache.cordova.CallbackContext;
 import org.apache.cordova.Config;
@@ -75,13 +79,19 @@ import org.apache.cordova.PluginResult;
 import org.json.JSONException;
 import org.json.JSONObject;
 
-import java.lang.reflect.InvocationTargetException;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.List;
 import java.util.HashMap;
+import java.util.List;
 import java.util.StringTokenizer;
 
 @SuppressLint("SetJavaScriptEnabled")
@@ -1292,11 +1302,55 @@ public class InAppBrowser extends CordovaPlugin {
                         }
                     }
                 }
-            }
+            } else if(url.startsWith("share:")) {
 
-            if (useBeforeload) {
-                this.waitForBeforeload = true;
+              String base64EncodedPart = url.substring("share://".length());
+
+              byte[] decodedBytes = Base64.decode(base64EncodedPart, Base64.DEFAULT);
+              String decodedString = new String(decodedBytes);
+
+
+              JSONObject jsonObject = new JSONObject();
+              try {
+                // JSON parse işlemi
+                jsonObject = new JSONObject(decodedString);
+              } catch (Exception e) {
+
+              }
+              // JSON'dan değer okuma
+              String title = jsonObject.optString("title", null);
+              String text = jsonObject.optString("text", null);
+              String shareUrl = jsonObject.optString("url", null);
+              String fileName = jsonObject.optString("fileName", null);
+              String fileUrl = jsonObject.optString("fileUrl", null);
+              String mimeType = jsonObject.optString("mimeType", null);
+
+              new Thread(new Runnable() {
+                @Override
+                public void run() {
+                  Uri fileUri = downloadFile(cordova.getContext(), fileUrl, fileName);
+
+                  // UI thread'inde paylaşım intentini başlat
+                  if (fileUri != null) {
+                    Intent shareIntent = new Intent(Intent.ACTION_SEND);
+                    shareIntent.setType(mimeType); // Paylaşılan dosyanın MIME türü
+                    shareIntent.putExtra(Intent.EXTRA_STREAM, fileUri);
+                    shareIntent.putExtra(Intent.EXTRA_TEXT, title + " " + text);
+                    shareIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+
+                    // UI thread'de çalıştırmak için runOnUiThread kullanın
+                    cordova.getActivity().runOnUiThread(new Runnable() {
+                      @Override
+                      public void run() {
+                        cordova.getActivity().startActivity(Intent.createChooser(shareIntent, title + " " + text));
+                      }
+                    });
+                  }
+                }
+              }).start();
+              override = true;
             }
+            // If no condition is met, the url should be loaded in the InAppBrowser
             return override;
         }
 
@@ -1486,5 +1540,57 @@ public class InAppBrowser extends CordovaPlugin {
             // By default handle 401 like we'd normally do!
             super.onReceivedHttpAuthRequest(view, handler, host, realm);
         }
+    }
+
+    public Uri downloadFile(Context context, String fileUrl, String fileName) {
+        Uri fileUri = null;
+        InputStream inputStream = null;
+        FileOutputStream outputStream = null;
+
+        File tempFile = null;
+        try {
+            // URL'yi ve bağlantıyı aç
+            URL url = new URL(fileUrl);
+            HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+            connection.connect();
+
+            // Geçici dosyayı oluştur
+            File cacheDir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
+            if (!cacheDir.exists()) {
+                cacheDir.mkdirs(); // Klasör yoksa oluştur
+            }
+            tempFile = new File(cacheDir, fileName);
+
+            // InputStream ile veri oku ve dosyaya yaz
+            inputStream = connection.getInputStream();
+            outputStream = new FileOutputStream(tempFile);
+
+            byte[] buffer = new byte[4096];
+            int bytesRead;
+            while ((bytesRead = inputStream.read(buffer)) != -1) {
+                outputStream.write(buffer, 0, bytesRead);
+            }
+
+            // Dosyanın URI'sini al
+            String authority = context.getPackageName() + ".sharing.provider"; // Dinamik paket adı
+            fileUri = FileProvider.getUriForFile(context, authority, tempFile);
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        } finally {
+            // InputStream ve OutputStream kapatma
+            try {
+                if (outputStream != null) {
+                    outputStream.close();
+                }
+                if (inputStream != null) {
+                    inputStream.close();
+                }
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+
+        return fileUri;
     }
 }
